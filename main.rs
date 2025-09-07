@@ -55,7 +55,7 @@ async fn pps_monitor(packet_count: Arc<AtomicU64>, running: Arc<AtomicU64>) {
 }
 
 // Helper function to safely write to stream with error handling
-// CORRECTED the type here to OwnedWriteHalf
+// **FIXED**: The type here is now correctly set to OwnedWriteHalf
 async fn safe_write(writer: &mut OwnedWriteHalf, message: &[u8]) -> Result<()> {
     match writer.write_all(message).await {
         Ok(_) => Ok(()),
