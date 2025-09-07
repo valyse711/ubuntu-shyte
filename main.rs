@@ -4,8 +4,6 @@ use tokio::time::{sleep, Duration};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use anyhow::Result;
-// Import the correct type for clarity
-use tokio::net::tcp::OwnedWriteHalf;
 
 const THREADS: usize = 50;
 const BURST_SIZE: usize = 5;
@@ -55,8 +53,8 @@ async fn pps_monitor(packet_count: Arc<AtomicU64>, running: Arc<AtomicU64>) {
 }
 
 // Helper function to safely write to stream with error handling
-// **FIXED**: The type here is now correctly set to OwnedWriteHalf
-async fn safe_write(writer: &mut OwnedWriteHalf, message: &[u8]) -> Result<()> {
+// FIXED: Use the correct type from into_split()
+async fn safe_write(writer: &mut tokio::net::tcp::OwnedWriteHalf, message: &[u8]) -> Result<()> {
     match writer.write_all(message).await {
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
